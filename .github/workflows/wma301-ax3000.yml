@@ -1,0 +1,110 @@
+name: 编译 ImmortalWrt 固件
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TARGET: mediatek
+      SUBTARGET: filogic
+      DTS_FILE: mt7981b-wma301-ax3000-v2.dts
+      PROFILE: WMA301_AX3000
+    steps:
+    - name: 🧹 清理空间
+      run: sudo rm -rf /usr/share/dotnet /opt/ghc && docker image prune -af || true
+
+    - name: 🔧 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses-dev zlib1g-dev \
+          gawk flex bison openssl libssl-dev gettext libelf-dev \
+          device-tree-compiler rsync git-core python3 unzip \
+          libtool-bin automake pkg-config ccache
+
+    - name: 📂 检查 DTS 文件是否存在
+      run: |
+        echo "🔍 当前目录内容："
+        find . -type f | sort
+        echo "📁 期望文件：dts/${DTS_FILE}"
+        
+        if [ ! -f "dts/${DTS_FILE}" ]; then
+          echo "❌ 错误：未找到 dts/${DTS_FILE}"
+          echo "💡 请确认："
+          echo "   1. 文件已放入仓库根目录的 dts/ 文件夹"
+          echo "   2. 文件名完全匹配（包括大小写）"
+          echo "   3. 已执行 git add dts/ && git push"
+          echo "   4. .gitignore 未忽略该文件"
+          exit 1
+        fi
+        echo "✅ 成功找到 DTS 文件：${DTS_FILE}"
+
+    - name: 📥 克隆源码
+      run: |
+        git clone -b openwrt-23.05 --depth 1 https://github.com/immortalwrt/immortalwrt source
+        cd source
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 📁 复制 DTS
+      run: |
+        cd source
+        mkdir -p target/linux/${TARGET}/dts
+        cp ../dts/${DTS_FILE} target/linux/${TARGET}/dts/
+
+    - name: 🔧 注册新设备
+      run: >-
+        DIR="source/target/linux/mediatek/filogic/image";
+        MAKEFILE="$DIR/Makefile";
+        mkdir -p "$DIR";
+        if [ ! -f "$MAKEFILE" ]; then
+          echo 'include \$(INCLUDE_DIR)/image.mk' > "$MAKEFILE";
+        fi;
+        if ! grep -q "define Device/WMA301_AX3000" "$MAKEFILE"; then
+          echo 'define Device/WMA301_AX3000' >> "$MAKEFILE";           echo '  $(Device/filogic)' >> "$MAKEFILE";           echo '  DEVICE_VENDOR := Wma301' >> "$MAKEFILE";           echo '  DEVICE_MODEL := mt7981b-wma301-ax3000' >> "$MAKEFILE";           echo '  DEVICE_DTS := mt7981b-wma301-ax3000-v2' >> "$MAKEFILE";           echo '  DEVICE_PACKAGES := wpad-basic-mbedtls kmod-leds-gpio kmod-input-gpio-buttons kmod-mt7915 kmod-mt7531ae luci relayd odhcpd-ipv6only samba36-server kmod-usb-printer kmod-of-mediatek-pinctrl' >> "$MAKEFILE";           echo '  SUPPORTED_DEVICES += mt7981b-wma301-ax3000-v2' >> "$MAKEFILE";           echo 'endef' >> "$MAKEFILE";           echo 'TARGET_DEVICES += WMA301_AX3000' >> "$MAKEFILE"
+        fi
+
+    - name: 🎛️ 生成配置
+      run: |
+        cd source
+        touch .config
+        echo 'CONFIG_TARGET_mediatek=y' >> .config
+        echo 'CONFIG_TARGET_mediatek_filogic=y' >> .config
+        echo 'CONFIG_TARGET_mediatek_filogic_DEVICE_WMA301_AX3000=y' >> .config
+        echo 'CONFIG_PACKAGE_u-boot-mediatek=y' >> .config
+        echo 'CONFIG_PACKAGE_u-boot-mediatek-images=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-leds-gpio=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-input-gpio-buttons=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-of-mediatek-pinctrl=y' >> .config
+        echo 'CONFIG_PACKAGE_luci=y' >> .config
+        echo 'CONFIG_PACKAGE_relayd=y' >> .config
+        echo 'CONFIG_PACKAGE_odhcpd-ipv6only=y' >> .config
+        echo 'CONFIG_PACKAGE_samba36-server=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-usb-printer=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-mt7915=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-mt7915=y' >> .config
+        echo 'CONFIG_PACKAGE_kmod-mt7531ae=y' >> .config
+        make defconfig
+
+    - name: 🏗️ 编译固件
+      run: |
+        cd source
+        make -j$(nproc) V=s
+
+    - name: 🔍 检查固件大小
+      run: |
+        for f in source/bin/targets/*/*/openwrt-*-*-squashfs-sysupgrade.bin; do
+          [ -f "$f" ] || continue
+          sz=$(stat -c%s "$f")
+          echo "$f -> $sz 字节"
+          if [ $sz -gt 134217728 ]; then
+            echo "❌ 固件超出 128MB 限制"
+            exit 1
+          fi
+        done
+
+    - name: 📦 上传固件
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-${{ github.run_number }}
+        path: source/bin/targets/${TARGET}/${SUBTARGET}/**
+        retention-days: 90
